@@ -1,5 +1,6 @@
 import express from 'express';
 import prisma from './db.js';
+import { pushJob } from './queue.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -18,7 +19,7 @@ app.post('/jobs', async (req, res) => {
     return res.status(400).json({ error: 'name and command are required' });
   }
 
-  const job = await prisma.job.create({
+  let job = await prisma.job.create({
     data: {
       name,
       command,
@@ -28,6 +29,14 @@ app.post('/jobs', async (req, res) => {
       scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
     },
   });
+
+  if (!job.scheduledAt) {
+    await pushJob(job.id, job.priority);
+    job = await prisma.job.update({
+      where: { id: job.id },
+      data: { status: 'QUEUED' },
+    });
+  }
 
   res.status(201).json(job);
 });
