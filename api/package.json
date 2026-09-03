@@ -1,0 +1,16 @@
+{
+  "name": "job-scheduler-api",
+  "version": "1.0.0",
+  "description": "API server for distributed job scheduler",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "express": "^4.19.2",
+    "prisma": "^6.19.3"
+  }
+}
