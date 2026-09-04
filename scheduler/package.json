@@ -8,5 +8,11 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
   },
-  "dependencies": {}
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "@prisma/client": "^6.19.3"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.3"
+  }
 }

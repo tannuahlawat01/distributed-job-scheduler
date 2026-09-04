@@ -1,9 +1,13 @@
 import redis from './redis.js';
 import prisma from './db.js';
+import { sendHeartbeat } from './heartbeat.js';
 
 const workerId = process.env.HOSTNAME || 'worker-unknown';
 const QUEUE_KEY = 'jobs:queue';
 const POLL_INTERVAL_MS = 2000;
+const HEARTBEAT_INTERVAL_MS = 3000;
+
+let currentJobId = null;
 
 console.log(`Worker ${workerId} starting...`);
 
@@ -16,6 +20,7 @@ async function claimJob() {
 }
 
 async function executeJob(jobId) {
+  currentJobId = jobId;
   console.log(`Worker ${workerId} claimed job ${jobId}`);
 
   await prisma.job.update({
@@ -41,6 +46,7 @@ async function executeJob(jobId) {
   });
 
   console.log(`Worker ${workerId} completed job ${jobId}`);
+  currentJobId = null;
 }
 
 async function pollLoop() {
@@ -51,6 +57,7 @@ async function pollLoop() {
       await executeJob(jobId);
     } catch (err) {
       console.error(`Worker ${workerId} failed job ${jobId}:`, err.message);
+      currentJobId = null;
     }
   } else {
     console.log(`[${new Date().toISOString()}] Worker ${workerId} — queue empty, idle`);
@@ -59,4 +66,11 @@ async function pollLoop() {
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
+async function heartbeatLoop() {
+  await sendHeartbeat(workerId, currentJobId);
+  setTimeout(heartbeatLoop, HEARTBEAT_INTERVAL_MS);
+}
+
+// Both loops start independently — heartbeat keeps beating even during a long-running job
 pollLoop();
+heartbeatLoop();

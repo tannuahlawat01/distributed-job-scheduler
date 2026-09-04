@@ -1,0 +1,86 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum JobStatus {
+  PENDING
+  QUEUED
+  RUNNING
+  SUCCESS
+  FAILED
+  RETRYING
+  CANCELLED
+  TIMEOUT
+}
+
+enum WorkerStatus {
+  ONLINE
+  OFFLINE
+}
+
+model Job {
+  id           String    @id @default(uuid())
+  name         String
+  command      String
+  priority     Int       @default(5)
+  status       JobStatus @default(PENDING)
+  createdAt    DateTime  @default(now())
+  scheduledAt  DateTime?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  workerId     String?
+  retryCount   Int       @default(0)
+  maxRetries   Int       @default(3)
+  timeout      Int       @default(30)
+  result       String?
+  error        String?
+
+  attempts     JobAttempt[]
+  logs         JobLog[]
+
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@index([scheduledAt])
+}
+
+model JobAttempt {
+  id          String    @id @default(uuid())
+  jobId       String
+  job         Job       @relation(fields: [jobId], references: [id])
+  workerId    String?
+  attemptNum  Int
+  status      JobStatus
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  error       String?
+
+  @@index([jobId])
+}
+
+model Worker {
+  id            String       @id
+  status        WorkerStatus @default(OFFLINE)
+  currentJobId  String?
+  lastHeartbeat DateTime?
+  jobsCompleted Int          @default(0)
+  jobsFailed    Int          @default(0)
+  createdAt     DateTime     @default(now())
+}
+
+model JobLog {
+  id        String   @id @default(uuid())
+  jobId     String
+  job       Job      @relation(fields: [jobId], references: [id])
+  workerId  String?
+  logLevel  String
+  message   String
+  timestamp DateTime @default(now())
+
+  @@index([jobId])
+}
