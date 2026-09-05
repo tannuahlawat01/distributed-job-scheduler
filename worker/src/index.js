@@ -24,7 +24,7 @@ async function claimJob() {
   return jobId;
 }
 
-async function executeJob(jobId, retryCount, maxRetries) {
+async function executeJob(jobId, retryCount, maxRetries, timeoutSeconds) {
   currentJobId = jobId;
   console.log(`Worker ${workerId} claimed job ${jobId} (attempt ${retryCount + 1})`);
 
@@ -37,16 +37,23 @@ async function executeJob(jobId, retryCount, maxRetries) {
     },
   });
 
-  const duration = 2000 + Math.random() * 2000;
-  await new Promise((resolve) => setTimeout(resolve, duration));
+  const actualWork = (async () => {
+    const duration = 2000 + Math.random() * 2000;
+    await new Promise((resolve) => setTimeout(resolve, duration));
 
-  // Simulate ~40% failure rate for testing retry logic
-  const shouldFail = Math.random() < 0.4;
+    const shouldFail = Math.random() < 0.4;
+    if (shouldFail) {
+      throw new Error('Simulated job failure');
+    }
+  })();
 
-  if (shouldFail) {
-    throw new Error('Simulated job failure');
-  }
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('TIMEOUT')), timeoutSeconds * 1000);
+  });
 
+  await Promise.race([actualWork, timeoutPromise]);
+
+  // Only reached if actualWork won the race without throwing
   await prisma.job.update({
     where: { id: jobId },
     data: {
@@ -67,11 +74,13 @@ async function pollLoop() {
     const job = await prisma.job.findUnique({ where: { id: jobId } });
 
     try {
-      await executeJob(jobId, job.retryCount, job.maxRetries);
+      await executeJob(jobId, job.retryCount, job.maxRetries, job.timeout);
     } catch (err) {
       console.error(`Worker ${workerId} failed job ${jobId}:`, err.message);
       currentJobId = null;
-      await handleJobFailure(job, err.message);
+
+      const isTimeout = err.message === 'TIMEOUT';
+      await handleJobFailure(job, err.message, isTimeout);
     }
   } else {
     console.log(`[${new Date().toISOString()}] Worker ${workerId} — queue empty, idle`);
@@ -80,29 +89,27 @@ async function pollLoop() {
   setTimeout(pollLoop, POLL_INTERVAL_MS);
 }
 
-async function handleJobFailure(job, errorMessage) {
+async function handleJobFailure(job, errorMessage, isTimeout = false) {
   const newRetryCount = job.retryCount + 1;
 
-  // Log this attempt
   await prisma.jobAttempt.create({
     data: {
       jobId: job.id,
       workerId,
       attemptNum: newRetryCount,
-      status: 'FAILED',
+      status: isTimeout ? 'TIMEOUT' : 'FAILED',
       error: errorMessage,
       completedAt: new Date(),
     },
   });
 
   if (newRetryCount >= job.maxRetries) {
-    // Exhausted retries — send to dead-letter queue
     console.log(`Job ${job.id} exhausted retries (${newRetryCount}/${job.maxRetries}) — moving to DLQ`);
 
     await prisma.job.update({
       where: { id: job.id },
       data: {
-        status: 'FAILED',
+        status: isTimeout ? 'TIMEOUT' : 'FAILED',
         retryCount: newRetryCount,
         error: errorMessage,
         completedAt: new Date(),
@@ -111,7 +118,6 @@ async function handleJobFailure(job, errorMessage) {
 
     await redis.zadd('jobs:dlq', Date.now(), job.id);
   } else {
-    // Schedule a retry with exponential backoff
     const backoffSeconds = Math.pow(2, newRetryCount);
     console.log(`Job ${job.id} will retry in ${backoffSeconds}s (attempt ${newRetryCount + 1}/${job.maxRetries})`);
 
@@ -124,7 +130,6 @@ async function handleJobFailure(job, errorMessage) {
       },
     });
 
-    // Re-queue after the backoff delay
     setTimeout(async () => {
       const score = computeScore(job.priority);
       await redis.zadd(QUEUE_KEY, score, job.id);
