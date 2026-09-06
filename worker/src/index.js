@@ -1,4 +1,4 @@
-import redis from './redis.js';
+import redis, { publishJobUpdate } from './redis.js';
 import prisma from './db.js';
 import { sendHeartbeat } from './heartbeat.js';
 
@@ -16,8 +16,8 @@ function computeScore(priority) {
   const timestamp = Date.now();
   return invertedPriority * 1e13 + timestamp;
 }
+
 async function claimJob() {
-  // ZPOPMIN is atomic — only one worker can ever pop a given job
   const result = await redis.zpopmin(QUEUE_KEY, 1);
   if (result.length === 0) return null;
   const [jobId] = result;
@@ -30,12 +30,9 @@ async function executeJob(jobId, retryCount, maxRetries, timeoutSeconds) {
 
   await prisma.job.update({
     where: { id: jobId },
-    data: {
-      status: 'RUNNING',
-      startedAt: new Date(),
-      workerId,
-    },
+    data: { status: 'RUNNING', startedAt: new Date(), workerId },
   });
+  await publishJobUpdate(jobId, 'RUNNING');
 
   const actualWork = (async () => {
     const duration = 2000 + Math.random() * 2000;
@@ -53,7 +50,6 @@ async function executeJob(jobId, retryCount, maxRetries, timeoutSeconds) {
 
   await Promise.race([actualWork, timeoutPromise]);
 
-  // Only reached if actualWork won the race without throwing
   await prisma.job.update({
     where: { id: jobId },
     data: {
@@ -62,6 +58,7 @@ async function executeJob(jobId, retryCount, maxRetries, timeoutSeconds) {
       result: `Executed successfully by ${workerId}`,
     },
   });
+  await publishJobUpdate(jobId, 'SUCCESS');
 
   console.log(`Worker ${workerId} completed job ${jobId}`);
   currentJobId = null;
@@ -106,15 +103,18 @@ async function handleJobFailure(job, errorMessage, isTimeout = false) {
   if (newRetryCount >= job.maxRetries) {
     console.log(`Job ${job.id} exhausted retries (${newRetryCount}/${job.maxRetries}) — moving to DLQ`);
 
+    const finalStatus = isTimeout ? 'TIMEOUT' : 'FAILED';
+
     await prisma.job.update({
       where: { id: job.id },
       data: {
-        status: isTimeout ? 'TIMEOUT' : 'FAILED',
+        status: finalStatus,
         retryCount: newRetryCount,
         error: errorMessage,
         completedAt: new Date(),
       },
     });
+    await publishJobUpdate(job.id, finalStatus);
 
     await redis.zadd('jobs:dlq', Date.now(), job.id);
   } else {
@@ -123,12 +123,9 @@ async function handleJobFailure(job, errorMessage, isTimeout = false) {
 
     await prisma.job.update({
       where: { id: job.id },
-      data: {
-        status: 'RETRYING',
-        retryCount: newRetryCount,
-        error: errorMessage,
-      },
+      data: { status: 'RETRYING', retryCount: newRetryCount, error: errorMessage },
     });
+    await publishJobUpdate(job.id, 'RETRYING');
 
     setTimeout(async () => {
       const score = computeScore(job.priority);
@@ -138,6 +135,7 @@ async function handleJobFailure(job, errorMessage, isTimeout = false) {
         where: { id: job.id },
         data: { status: 'QUEUED' },
       });
+      await publishJobUpdate(job.id, 'QUEUED');
     }, backoffSeconds * 1000);
   }
 }
@@ -147,6 +145,5 @@ async function heartbeatLoop() {
   setTimeout(heartbeatLoop, HEARTBEAT_INTERVAL_MS);
 }
 
-// Both loops start independently — heartbeat keeps beating even during a long-running job
 pollLoop();
 heartbeatLoop();

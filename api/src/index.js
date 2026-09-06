@@ -1,17 +1,21 @@
 import express from 'express';
+import http from 'http';
+import cors from 'cors';
 import prisma from './db.js';
 import { pushJob } from './queue.js';
+import { initWebSocketServer } from './ws.js';
+import { startSubscriber } from './pubsub.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+app.use(cors());
 app.use(express.json());
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'api', timestamp: new Date().toISOString() });
 });
 
-// Create a job
 app.post('/jobs', async (req, res) => {
   const { name, command, priority, maxRetries, timeout, scheduledAt } = req.body;
 
@@ -41,7 +45,6 @@ app.post('/jobs', async (req, res) => {
   res.status(201).json(job);
 });
 
-// List all jobs
 app.get('/jobs', async (req, res) => {
   const jobs = await prisma.job.findMany({
     orderBy: { createdAt: 'desc' },
@@ -49,7 +52,6 @@ app.get('/jobs', async (req, res) => {
   res.json(jobs);
 });
 
-// Get one job
 app.get('/jobs/:id', async (req, res) => {
   const job = await prisma.job.findUnique({
     where: { id: req.params.id },
@@ -62,6 +64,29 @@ app.get('/jobs/:id', async (req, res) => {
   res.json(job);
 });
 
-app.listen(PORT, () => {
+app.get('/workers', async (req, res) => {
+  const workers = await prisma.worker.findMany({
+    orderBy: { lastHeartbeat: 'desc' },
+  });
+  res.json(workers);
+});
+
+app.get('/stats', async (req, res) => {
+  const [total, running, queued, success, failed] = await Promise.all([
+    prisma.job.count(),
+    prisma.job.count({ where: { status: 'RUNNING' } }),
+    prisma.job.count({ where: { status: 'QUEUED' } }),
+    prisma.job.count({ where: { status: 'SUCCESS' } }),
+    prisma.job.count({ where: { status: { in: ['FAILED', 'TIMEOUT'] } } }),
+  ]);
+
+  res.json({ total, running, queued, success, failed });
+});
+
+const server = http.createServer(app);
+initWebSocketServer(server);
+startSubscriber();
+
+server.listen(PORT, () => {
   console.log(`API server listening on port ${PORT}`);
 });
